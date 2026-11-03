@@ -218,8 +218,8 @@ class _SplashScreenState extends State<SplashScreen> {
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final logoAsset = isDark
-        ? 'assets/images/logo_dark.jpg'
-        : 'assets/images/logo_light.jpg';
+        ? 'assets/images/logo_dark.webp'
+        : 'assets/images/logo_light.webp';
 
     return Scaffold(
       body: SizedBox.expand(
@@ -549,8 +549,8 @@ class _GeneratorScreenState extends State<GeneratorScreen> {
 
     // 3. الأيقونة الديناميكية في الشاشة الرئيسية أعلى حقل إدخال الكود
     final drawerLogoAsset = isDark
-        ? 'assets/images/appdrawer_dark.jpg'
-        : 'assets/images/appdrawer_light.jpg';
+        ? 'assets/images/appdrawer_dark.webp'
+        : 'assets/images/appdrawer_light.webp';
 
     return Directionality(
       textDirection: TextDirection.rtl,
