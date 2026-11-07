@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:math';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -260,9 +261,47 @@ class _GeneratorScreenState extends State<GeneratorScreen> {
   final TextEditingController _codeController = TextEditingController();
   final GlobalKey<FormState> _formKey = GlobalKey<FormState>();
   bool _isLoading = false;
+  bool _isOnline = true;
+  StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
+
+  @override
+  void initState() {
+    super.initState();
+    _initConnectivity();
+  }
+
+  /// تهيئة ومراقبة حالة الشبكة في الوقت الفعلي
+  Future<void> _initConnectivity() async {
+    try {
+      final results = await Connectivity().checkConnectivity();
+      if (mounted) {
+        setState(() {
+          _isOnline = _checkIsOnline(results);
+        });
+      }
+    } catch (e) {
+      debugPrint('⚠️ Error checking initial connectivity: $e');
+    }
+
+    _connectivitySubscription = Connectivity().onConnectivityChanged.listen(
+      (List<ConnectivityResult> results) {
+        if (mounted) {
+          setState(() {
+            _isOnline = _checkIsOnline(results);
+          });
+        }
+      },
+    );
+  }
+
+  /// التحقق من توفر اتصال بالشبكة
+  bool _checkIsOnline(List<ConnectivityResult> results) {
+    return results.any((result) => result != ConnectivityResult.none);
+  }
 
   @override
   void dispose() {
+    _connectivitySubscription?.cancel();
     _codeController.dispose();
     super.dispose();
   }
@@ -414,8 +453,50 @@ class _GeneratorScreenState extends State<GeneratorScreen> {
     }
   }
 
-  /// 1. توليد كود عشوائي مكون من 6 أرقام وإرساله وتفعيله فوراً في Supabase بضغطة واحدة
+  /// 1. توليد كود عشوائي مكون من 6 أرقام وإرساله وتفعيله فوراً في Supabase بضغطة واحدة مع فحص الشبكة والمهلة الزمنية
   Future<void> _generateAndSubmitCode() async {
+    // 1. فحص حالة الاتصال بالإنترنت أولاً قبل بدء أي عملية
+    final connectivityResults = await Connectivity().checkConnectivity();
+    final isOnline = _checkIsOnline(connectivityResults);
+
+    if (_isOnline != isOnline && mounted) {
+      setState(() {
+        _isOnline = isOnline;
+      });
+    }
+
+    // إذا كان الجهاز غير متصل، إظهار SnackBar بلون أحمر وإيقاف التنفيذ فوراً دون تشغيل مؤشر التحميل
+    if (!isOnline) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Row(
+            children: [
+              Icon(Icons.wifi_off_rounded, color: Colors.white),
+              SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'لا يوجد اتصال بالإنترنت',
+                  style: TextStyle(
+                    fontFamily: 'Cairo',
+                    fontWeight: FontWeight.bold,
+                    fontSize: 14,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          backgroundColor: const Color(0xFFDC2626), // Red 600
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(10),
+          ),
+          duration: const Duration(seconds: 4),
+        ),
+      );
+      return;
+    }
+
     // أ. توليد كود عشوائي مكون من 6 أرقام وإظهاره في الحقل
     final random = Random();
     final code = (100000 + random.nextInt(900000)).toString();
@@ -434,37 +515,51 @@ class _GeneratorScreenState extends State<GeneratorScreen> {
           .add(const Duration(days: 30))
           .toIso8601String();
 
-      // 1. تفعيل كود الدعوة لبوابة الدخول (Gatekeeper / validate_invitation_code RPC)
+      // 1. تفعيل كود الدعوة لبوابة الدخول (Gatekeeper / validate_invitation_code RPC) بمهلة 10 ثوانٍ
       try {
-        await supabase.rpc('create_invitation', params: {'new_code': code});
+        await supabase
+            .rpc('create_invitation', params: {'new_code': code})
+            .timeout(const Duration(seconds: 10));
+      } on TimeoutException {
+        rethrow;
       } catch (rpcError) {
         debugPrint('⚠️ create_invitation RPC info: $rpcError');
       }
 
-      // 2. محاولة حذف أي كود مكرر أولاً لتفادي تعارض المفاتيح
+      // 2. محاولة حذف أي كود مكرر أولاً لتفادي تعارض المفاتيح بمهلة 10 ثوانٍ
       try {
-        await supabase.from('pairing_codes').delete().eq('code', code);
+        await supabase
+            .from('pairing_codes')
+            .delete()
+            .eq('code', code)
+            .timeout(const Duration(seconds: 10));
+      } on TimeoutException {
+        rethrow;
       } catch (_) {
         // تجاهل إذا لم تتوفر صلاحية الحذف
       }
 
-      // 3. إدراج الكود في جدول pairing_codes ككود عام فقط (code, is_used: false, expires_at)
+      // 3. إدراج الكود في جدول pairing_codes ككود عام فقط بمهلة 10 ثوانٍ
       try {
-        await supabase.from('pairing_codes').insert({
-          'code': code,
-          'is_used': false,
-          'expires_at': expiresAt,
-        });
+        await supabase
+            .from('pairing_codes')
+            .insert({
+              'code': code,
+              'is_used': false,
+              'expires_at': expiresAt,
+            })
+            .timeout(const Duration(seconds: 10));
+      } on TimeoutException {
+        rethrow;
       } catch (_) {
         // في حال كان عمود is_used غير موجود في جدول pairing_codes
-        try {
-          await supabase.from('pairing_codes').insert({
-            'code': code,
-            'expires_at': expiresAt,
-          });
-        } catch (insertError) {
-          debugPrint('⚠️ pairing_codes insert error: $insertError');
-        }
+        await supabase
+            .from('pairing_codes')
+            .insert({
+              'code': code,
+              'expires_at': expiresAt,
+            })
+            .timeout(const Duration(seconds: 10));
       }
 
       if (!mounted) return;
@@ -499,11 +594,17 @@ class _GeneratorScreenState extends State<GeneratorScreen> {
     } catch (error) {
       if (!mounted) return;
 
-      String errorMessage = error.toString();
-      if (errorMessage.contains('42501') ||
-          errorMessage.contains('row-level security policy')) {
+      String errorMessage;
+      if (error is TimeoutException) {
         errorMessage =
-            'خطأ في صلاحيات قاعدة البيانات (RLS): يجب تفعيل سياسة السماح لجدول pairing_codes في Supabase.';
+            'انتهت مهلة الاتصال بالخادم (10 ثوانٍ). يرجى التحقق من اتصال الإنترنت والمحاولة مجدداً.';
+      } else {
+        errorMessage = error.toString();
+        if (errorMessage.contains('42501') ||
+            errorMessage.contains('row-level security policy')) {
+          errorMessage =
+              'خطأ في صلاحيات قاعدة البيانات (RLS): يجب تفعيل سياسة السماح لجدول pairing_codes في Supabase.';
+        }
       }
 
       // عند الفشل: أظهر SnackBar باللون الأحمر يعرض تفاصيل الخطأ
@@ -582,24 +683,30 @@ class _GeneratorScreenState extends State<GeneratorScreen> {
                 );
               },
             ),
+            // 3. مؤشر حالة الشبكة في الوقت الفعلي (Real-time Network Indicator)
             Padding(
               padding: const EdgeInsets.only(left: 12.0, right: 6.0),
               child: Row(
                 children: [
-                  Container(
+                  AnimatedContainer(
+                    duration: const Duration(milliseconds: 300),
                     width: 10,
                     height: 10,
-                    decoration: const BoxDecoration(
-                      color: Color(0xFF22C55E), // Online green dot
+                    decoration: BoxDecoration(
+                      color: _isOnline
+                          ? const Color(0xFF22C55E) // نقطة خضراء عند توفر الإنترنت
+                          : const Color(0xFFEF4444), // نقطة حمراء عند غياب الإنترنت
                       shape: BoxShape.circle,
                     ),
                   ),
                   const SizedBox(width: 6),
                   Text(
-                    'متصل',
+                    _isOnline ? 'متصل' : 'غير متصل',
                     style: TextStyle(
                       fontSize: 13,
-                      color: isDark ? Colors.white70 : const Color(0xFF475569),
+                      color: _isOnline
+                          ? (isDark ? Colors.white70 : const Color(0xFF475569))
+                          : const Color(0xFFEF4444),
                       fontWeight: FontWeight.w600,
                     ),
                   ),
